@@ -9,6 +9,3 @@ CFLAGS := -Wall -Werror -O3 -D_YUGA_LITTLE_ENDIAN=0 -D_YUGA_BIG_ENDIAN=1 -ccc-ho
 
 FUNCTIONS := divsi3 modsi3 comparedf2 negsf2 negdf2 addsf3 subsf3 mulsf3 divsf3 lshrdi3 muldi3 ashldi3 \
   floatsisf floatunsisf fixsfsi fixunssfsi adddf3 subdf3 muldf3 divdf3 floatsidf floatunsidf fixdfsi fixunsdfsi
-
-# Already implemented in HW, but divsi3 depends directly on it (FIXME)
-FUNCTIONS += udivsi3
