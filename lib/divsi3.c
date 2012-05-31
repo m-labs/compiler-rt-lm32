@@ -14,8 +14,6 @@
 
 #include "int_lib.h"
 
-su_int COMPILER_RT_ABI __udivsi3(su_int n, su_int d);
-
 /* Returns: a / b */
 
 ARM_EABI_FNALIAS(idiv, divsi3);
@@ -29,5 +27,5 @@ __divsi3(si_int a, si_int b)
     a = (a ^ s_a) - s_a;                         /* negate if s_a == -1 */
     b = (b ^ s_b) - s_b;                         /* negate if s_b == -1 */
     s_a ^= s_b;                                  /* sign of quotient */
-    return (__udivsi3(a, b) ^ s_a) - s_a;        /* negate if s_a == -1 */
+    return ((su_int)a/(su_int)b ^ s_a) - s_a;        /* negate if s_a == -1 */
 }
