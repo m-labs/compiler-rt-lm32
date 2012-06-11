@@ -1,4 +1,4 @@
-//===-- tsan_stat.cc --------------------------------------------*- C++ -*-===//
+//===-- tsan_stat.cc ------------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -241,9 +241,9 @@ void StatOutput(u64 *stat) {
   name[StatMtxAtExit]                    = "  Atexit                          ";
   name[StatMtxAnnotations]               = "  Annotations                     ";
 
-  Printf("Statistics:\n");
+  TsanPrintf("Statistics:\n");
   for (int i = 0; i < StatCnt; i++)
-    Printf("%s: %llu\n", name[i], stat[i]);
+    TsanPrintf("%s: %zu\n", name[i], (uptr)stat[i]);
 }
 
 }  // namespace __tsan

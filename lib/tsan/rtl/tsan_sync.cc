@@ -1,4 +1,4 @@
-//===-- tsan_sync.cc --------------------------------------------*- C++ -*-===//
+//===-- tsan_sync.cc ------------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -10,8 +10,8 @@
 // This file is a part of ThreadSanitizer (TSan), a race detector.
 //
 //===----------------------------------------------------------------------===//
+#include "sanitizer_common/sanitizer_placement_new.h"
 #include "tsan_sync.h"
-#include "tsan_placement_new.h"
 #include "tsan_rtl.h"
 #include "tsan_mman.h"
 
@@ -155,7 +155,7 @@ void StackTrace::Init(const uptr *pcs, uptr cnt) {
     return;
   n_ = cnt;
   s_ = (uptr*)internal_alloc(MBlockStackTrace, cnt * sizeof(s_[0]));
-  internal_memcpy(s_, pcs, cnt * sizeof(s_[0]));
+  real_memcpy(s_, pcs, cnt * sizeof(s_[0]));
 }
 
 void StackTrace::ObtainCurrent(ThreadState *thr, uptr toppc) {

@@ -1,4 +1,4 @@
-//===-- tsan_interceptors_linux.cc ------------------------------*- C++ -*-===//
+//===-- tsan_interceptors_linux.cc ----------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -12,12 +12,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "interception/interception.h"
+#include "sanitizer_common/sanitizer_libc.h"
+#include "sanitizer_common/sanitizer_placement_new.h"
 #include "tsan_rtl.h"
 #include "tsan_interface.h"
 #include "tsan_atomic.h"
 #include "tsan_platform.h"
 #include "tsan_mman.h"
-#include "tsan_placement_new.h"
 
 using namespace __tsan;  // NOLINT
 
@@ -126,7 +127,7 @@ class ScopedInterceptor {
     StatInc(thr, StatInterceptor); \
     StatInc(thr, StatInt_##func); \
     ScopedInterceptor si(thr, #func, \
-        (__tsan::uptr)__builtin_return_address(0)); \
+        (__sanitizer::uptr)__builtin_return_address(0)); \
     const uptr pc = (uptr)&func; \
     (void)pc; \
 /**/
@@ -237,13 +238,13 @@ TSAN_INTERCEPTOR(int, atexit, void (*f)()) {
 
 TSAN_INTERCEPTOR(void, longjmp, void *env, int val) {
   SCOPED_TSAN_INTERCEPTOR(longjmp, env, val);
-  Printf("ThreadSanitizer: longjmp() is not supported\n");
+  TsanPrintf("ThreadSanitizer: longjmp() is not supported\n");
   Die();
 }
 
 TSAN_INTERCEPTOR(void, siglongjmp, void *env, int val) {
   SCOPED_TSAN_INTERCEPTOR(siglongjmp, env, val);
-  Printf("ThreadSanitizer: siglongjmp() is not supported\n");
+  TsanPrintf("ThreadSanitizer: siglongjmp() is not supported\n");
   Die();
 }
 
@@ -286,7 +287,7 @@ TSAN_INTERCEPTOR(void*, calloc, uptr size, uptr n) {
   {
     SCOPED_INTERCEPTOR_RAW(calloc, size, n);
     p = user_alloc(thr, pc, n * size);
-    internal_memset(p, 0, n * size);
+    real_memset(p, 0, n * size);
   }
   invoke_malloc_hook(p, n * size);
   return p;
@@ -619,7 +620,7 @@ static void thread_finalize(void *v) {
   uptr iter = (uptr)v;
   if (iter > 1) {
     if (pthread_setspecific(g_thread_finalize_key, (void*)(iter - 1))) {
-      Printf("ThreadSanitizer: failed to set thread key\n");
+      TsanPrintf("ThreadSanitizer: failed to set thread key\n");
       Die();
     }
     return;
@@ -646,7 +647,7 @@ extern "C" void *__tsan_thread_start_func(void *arg) {
     ThreadState *thr = cur_thread();
     ScopedInRtl in_rtl;
     if (pthread_setspecific(g_thread_finalize_key, (void*)4)) {
-      Printf("ThreadSanitizer: failed to set thread key\n");
+      TsanPrintf("ThreadSanitizer: failed to set thread key\n");
       Die();
     }
     while ((tid = atomic_load(&p->tid, memory_order_acquire)) == 0)
@@ -678,7 +679,7 @@ TSAN_INTERCEPTOR(int, pthread_create,
   // We place the huge ThreadState object into TLS, account for that.
   const uptr minstacksize = GetTlsSize() + 128*1024;
   if (stacksize < minstacksize) {
-    DPrintf("ThreadSanitizer: stacksize %lu->%lu\n", stacksize, minstacksize);
+    DPrintf("ThreadSanitizer: stacksize %zu->%zu\n", stacksize, minstacksize);
     pthread_attr_setstacksize(attr, minstacksize);
   }
   ThreadParam p;
@@ -1282,7 +1283,7 @@ TSAN_INTERCEPTOR(int, sigaction, int sig, sigaction_t *act, sigaction_t *old) {
 TSAN_INTERCEPTOR(sighandler_t, signal, int sig, sighandler_t h) {
   sigaction_t act = {};
   act.sa_handler = h;
-  internal_memset(&act.sa_mask, -1, sizeof(act.sa_mask));
+  real_memset(&act.sa_mask, -1, sizeof(act.sa_mask));
   act.sa_flags = 0;
   sigaction_t old = {};
   int res = sigaction(sig, &act, &old);
@@ -1510,30 +1511,26 @@ void InitializeInterceptors() {
       AtExitContext();
 
   if (__cxa_atexit(&finalize, 0, 0)) {
-    Printf("ThreadSanitizer: failed to setup atexit callback\n");
+    TsanPrintf("ThreadSanitizer: failed to setup atexit callback\n");
     Die();
   }
 
   if (pthread_key_create(&g_thread_finalize_key, &thread_finalize)) {
-    Printf("ThreadSanitizer: failed to create thread key\n");
+    TsanPrintf("ThreadSanitizer: failed to create thread key\n");
     Die();
   }
 }
 
-void internal_memset(void *ptr, int c, uptr size) {
+void real_memset(void *ptr, int c, uptr size) {
   REAL(memset)(ptr, c, size);
 }
 
-void internal_memcpy(void *dst, const void *src, uptr size) {
+void real_memcpy(void *dst, const void *src, uptr size) {
   REAL(memcpy)(dst, src, size);
 }
 
 int internal_memcmp(const void *s1, const void *s2, uptr size) {
   return REAL(memcmp)(s1, s2, size);
-}
-
-int internal_strcmp(const char *s1, const char *s2) {
-  return REAL(strcmp)(s1, s2);
 }
 
 int internal_strncmp(const char *s1, const char *s2, uptr size) {
@@ -1544,28 +1541,12 @@ void internal_strcpy(char *s1, const char *s2) {
   REAL(strcpy)(s1, s2);  // NOLINT
 }
 
-uptr internal_strlen(const char *s) {
-  return REAL(strlen)(s);
-}
-
-char* internal_strdup(const char *s) {
-  uptr len = internal_strlen(s);
-  char *s2 = (char*)internal_alloc(MBlockString, len + 1);
-  internal_memcpy(s2, s, len);
-  s2[len] = 0;
-  return s2;
-}
-
 const char *internal_strstr(const char *where, const char *what) {
   return REAL(strstr)(where, what);
 }
 
 const char *internal_strchr(const char *where, char what) {
   return (const char*)REAL(strchr)((void*)where, what);
-}
-
-const char *internal_strrchr(const char *where, char what) {
-  return (const char*)REAL(strrchr)((void*)where, what);
 }
 
 void internal_start_thread(void(*func)(void *arg), void *arg) {

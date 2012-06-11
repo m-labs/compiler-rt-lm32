@@ -11,17 +11,44 @@
 // run-time libraries.
 // These tools can not use some of the libc functions directly because those
 // functions are intercepted. Instead, we implement a tiny subset of libc here.
-//
-// We also define several basic types here to avoid using system headers
-// as the latter complicate portability of this low-level code.
 //===----------------------------------------------------------------------===//
 #ifndef SANITIZER_LIBC_H
 #define SANITIZER_LIBC_H
 
-// No code here yet. Will move more code in the next changes.
+#include "sanitizer_internal_defs.h"
+
 namespace __sanitizer {
 
 void MiniLibcStub();
+
+// internal_X() is a custom implementation of X() for use in RTL.
+
+// String functions
+void *internal_memchr(const void *s, int c, uptr n);
+void *internal_memcpy(void *dest, const void *src, uptr n);
+// Should not be used in performance-critical places.
+void *internal_memset(void *s, int c, uptr n);
+int internal_strcmp(const char *s1, const char *s2);
+char *internal_strdup(const char *s);
+uptr internal_strlen(const char *s);
+char *internal_strncpy(char *dst, const char *src, uptr n);
+char *internal_strrchr(const char *s, int c);
+
+// Memory
+void *internal_mmap(void *addr, uptr length, int prot, int flags,
+                    int fd, u64 offset);
+int internal_munmap(void *addr, uptr length);
+
+// I/O
+typedef int fd_t;
+const fd_t kInvalidFd = -1;
+int internal_close(fd_t fd);
+fd_t internal_open(const char *filename, bool write);
+uptr internal_read(fd_t fd, void *buf, uptr count);
+uptr internal_write(fd_t fd, const void *buf, uptr count);
+uptr internal_filesize(fd_t fd);  // -1 on error.
+int internal_dup2(int oldfd, int newfd);
+int internal_sscanf(const char *str, const char *format, ...);
 
 }  // namespace __sanitizer
 

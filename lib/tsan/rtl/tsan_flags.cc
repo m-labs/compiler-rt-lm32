@@ -1,4 +1,4 @@
-//===-- tsan_flags.cc -------------------------------------------*- C++ -*-===//
+//===-- tsan_flags.cc -----------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "sanitizer_common/sanitizer_libc.h"
 #include "tsan_flags.h"
 #include "tsan_rtl.h"
 #include "tsan_mman.h"
@@ -31,7 +32,7 @@ void WEAK OverrideFlags(Flags *f) {
 }
 
 void InitializeFlags(Flags *f, const char *env) {
-  internal_memset(f, 0, sizeof(*f));
+  real_memset(f, 0, sizeof(*f));
 
   // Default values.
   f->enable_annotations = true;
@@ -138,7 +139,7 @@ static void Flag(const char *env, const char **flag, const char *name) {
     return;
   int len = end - val;
   char *f = (char*)internal_alloc(MBlockFlag, len + 1);
-  internal_memcpy(f, val, len);
+  real_memcpy(f, val, len);
   f[len] = 0;
   *flag = f;
 }

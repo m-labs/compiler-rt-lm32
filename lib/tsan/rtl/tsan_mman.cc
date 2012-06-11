@@ -1,4 +1,4 @@
-//===-- tsan_mman.cc --------------------------------------------*- C++ -*-===//
+//===-- tsan_mman.cc ------------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -10,6 +10,7 @@
 // This file is a part of ThreadSanitizer (TSan), a race detector.
 //
 //===----------------------------------------------------------------------===//
+#include "sanitizer_common/sanitizer_common.h"
 #include "tsan_mman.h"
 #include "tsan_allocator.h"
 #include "tsan_rtl.h"
@@ -40,7 +41,7 @@ void *user_alloc(ThreadState *thr, uptr pc, uptr sz) {
   if (CTX() && CTX()->initialized) {
     MemoryResetRange(thr, pc, (uptr)p, sz);
   }
-  DPrintf("#%d: alloc(%lu) = %p\n", thr->tid, sz, p);
+  DPrintf("#%d: alloc(%zu) = %p\n", thr->tid, sz, p);
   SignalUnsafeCall(thr, pc);
   return p;
 }
@@ -92,7 +93,7 @@ MBlock *user_mblock(ThreadState *thr, void *p) {
   MBlock *b = (MBlock*)AllocBlock(p);
   // FIXME: Output a warning, it's a user error.
   if (p < (char*)(b + 1) || p > (char*)(b + 1) + b->size) {
-    Printf("user_mblock p=%p b=%p size=%lu beg=%p end=%p\n",
+    TsanPrintf("user_mblock p=%p b=%p size=%zu beg=%p end=%p\n",
         p, b, b->size, (char*)(b + 1), (char*)(b + 1) + b->size);
     CHECK_GE(p, (char*)(b + 1));
     CHECK_LE(p, (char*)(b + 1) + b->size);
@@ -103,13 +104,13 @@ MBlock *user_mblock(ThreadState *thr, void *p) {
 void *internal_alloc(MBlockType typ, uptr sz) {
   ThreadState *thr = cur_thread();
   CHECK_GT(thr->in_rtl, 0);
-  return Alloc(sz);
+  return InternalAlloc(sz);
 }
 
 void internal_free(void *p) {
   ThreadState *thr = cur_thread();
   CHECK_GT(thr->in_rtl, 0);
-  Free(p);
+  InternalFree(p);
 }
 
 }  // namespace __tsan

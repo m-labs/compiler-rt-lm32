@@ -1,4 +1,4 @@
-//===-- asan_rtl.cc ---------------------------------------------*- C++ -*-===//
+//===-- asan_rtl.cc -------------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -21,9 +21,40 @@
 #include "asan_stats.h"
 #include "asan_thread.h"
 #include "asan_thread_registry.h"
+#include "sanitizer_common/sanitizer_libc.h"
+
+namespace __sanitizer {
+using namespace __asan;
+
+void Die() {
+  static int num_calls = 0;
+  if (AtomicInc(&num_calls) > 1) {
+    // Don't die twice - run a busy loop.
+    while (1) { }
+  }
+  if (FLAG_sleep_before_dying) {
+    Report("Sleeping for %zd second(s)\n", FLAG_sleep_before_dying);
+    SleepForSeconds(FLAG_sleep_before_dying);
+  }
+  if (FLAG_unmap_shadow_on_exit)
+    UnmapOrDie((void*)kLowShadowBeg, kHighShadowEnd - kLowShadowBeg);
+  if (death_callback)
+    death_callback();
+  if (FLAG_abort_on_error)
+    Abort();
+  Exit(FLAG_exitcode);
+}
+
+void CheckFailed(const char *file, int line, const char *cond, u64 v1, u64 v2) {
+  AsanReport("AddressSanitizer CHECK failed: %s:%d \"%s\" (%zx, %zx)\n",
+             file, line, cond, (uptr)v1, (uptr)v2);
+  PRINT_CURRENT_STACK();
+  ShowStatsAndAbort();
+}
+
+}  // namespace __sanitizer
 
 namespace __asan {
-using namespace __sanitizer;
 
 // -------------------------- Flags ------------------------- {{{1
 static const uptr kMallocContextSize = 30;
@@ -38,7 +69,7 @@ bool    FLAG_poison_shadow = 1;
 s64 FLAG_report_globals = 1;
 bool    FLAG_handle_segv = ASAN_NEEDS_SEGV;
 bool    FLAG_use_sigaltstack = 0;
-bool    FLAG_symbolize = 1;
+bool    FLAG_symbolize = 0;
 s64 FLAG_demangle = 1;
 s64 FLAG_debug = 0;
 bool    FLAG_replace_cfallocator = 1;  // Used on Mac only.
@@ -56,7 +87,7 @@ bool    FLAG_check_malloc_usable_size = 1;
 // -------------------------- Globals --------------------- {{{1
 int asan_inited;
 bool asan_init_is_running;
-static void (*death_callback)(void);
+void (*death_callback)(void);
 static void (*error_report_callback)(const char*);
 char *error_message_buffer = 0;
 uptr error_message_buffer_pos = 0;
@@ -65,78 +96,32 @@ uptr error_message_buffer_size = 0;
 // -------------------------- Misc ---------------- {{{1
 void ShowStatsAndAbort() {
   __asan_print_accumulated_stats();
-  AsanDie();
+  Die();
 }
 
 static void PrintBytes(const char *before, uptr *a) {
   u8 *bytes = (u8*)a;
   uptr byte_num = (__WORDSIZE) / 8;
-  Printf("%s%p:", before, (void*)a);
+  AsanPrintf("%s%p:", before, (void*)a);
   for (uptr i = 0; i < byte_num; i++) {
-    Printf(" %x%x", bytes[i] >> 4, bytes[i] & 15);
+    AsanPrintf(" %x%x", bytes[i] >> 4, bytes[i] & 15);
   }
-  Printf("\n");
+  AsanPrintf("\n");
 }
 
-uptr ReadFileToBuffer(const char *file_name, char **buff,
-                         uptr *buff_size, uptr max_len) {
-  const uptr kMinFileLen = kPageSize;
-  uptr read_len = 0;
-  *buff = 0;
-  *buff_size = 0;
-  // The files we usually open are not seekable, so try different buffer sizes.
-  for (uptr size = kMinFileLen; size <= max_len; size *= 2) {
-    int fd = AsanOpenReadonly(file_name);
-    if (fd < 0) return 0;
-    AsanUnmapOrDie(*buff, *buff_size);
-    *buff = (char*)AsanMmapSomewhereOrDie(size, __FUNCTION__);
-    *buff_size = size;
-    // Read up to one page at a time.
-    read_len = 0;
-    bool reached_eof = false;
-    while (read_len + kPageSize <= size) {
-      uptr just_read = AsanRead(fd, *buff + read_len, kPageSize);
-      if (just_read == 0) {
-        reached_eof = true;
-        break;
-      }
-      read_len += just_read;
-    }
-    AsanClose(fd);
-    if (reached_eof)  // We've read the whole file.
-      break;
+void AppendToErrorMessageBuffer(const char *buffer) {
+  if (error_message_buffer) {
+    uptr length = (uptr)internal_strlen(buffer);
+    int remaining = error_message_buffer_size - error_message_buffer_pos;
+    internal_strncpy(error_message_buffer + error_message_buffer_pos,
+                     buffer, remaining);
+    error_message_buffer[error_message_buffer_size - 1] = '\0';
+    // FIXME: reallocate the buffer instead of truncating the message.
+    error_message_buffer_pos += remaining > length ? length : remaining;
   }
-  return read_len;
-}
-
-void AsanDie() {
-  static int num_calls = 0;
-  if (AtomicInc(&num_calls) > 1) {
-    // Don't die twice - run a busy loop.
-    while (1) { }
-  }
-  if (FLAG_sleep_before_dying) {
-    Report("Sleeping for %d second(s)\n", FLAG_sleep_before_dying);
-    SleepForSeconds(FLAG_sleep_before_dying);
-  }
-  if (FLAG_unmap_shadow_on_exit)
-    AsanUnmapOrDie((void*)kLowShadowBeg, kHighShadowEnd - kLowShadowBeg);
-  if (death_callback)
-    death_callback();
-  if (FLAG_abort_on_error)
-    Abort();
-  Exit(FLAG_exitcode);
 }
 
 // ---------------------- mmap -------------------- {{{1
-void OutOfMemoryMessageAndDie(const char *mem_type, uptr size) {
-  Report("ERROR: AddressSanitizer failed to allocate "
-         "0x%zx (%zd) bytes of %s\n",
-         size, size, mem_type);
-  PRINT_CURRENT_STACK();
-  ShowStatsAndAbort();
-}
-
 // Reserve memory range [beg, end].
 static void ReserveShadowMemoryRange(uptr beg, uptr end) {
   CHECK((beg % kPageSize) == 0);
@@ -152,7 +137,7 @@ void *LowLevelAllocator::Allocate(uptr size) {
   if (allocated_end_ - allocated_current_ < size) {
     uptr size_to_allocate = Max(size, kPageSize);
     allocated_current_ =
-        (char*)AsanMmapSomewhereOrDie(size_to_allocate, __FUNCTION__);
+        (char*)MmapOrDie(size_to_allocate, __FUNCTION__);
     allocated_end_ = allocated_current_ + size_to_allocate;
     PoisonShadow((uptr)allocated_current_, size_to_allocate,
                  kAsanInternalHeapMagic);
@@ -182,14 +167,14 @@ static bool DescribeStackAddress(uptr addr, uptr access_size) {
   internal_strncat(buf, frame_descr,
                    Min(kBufSize,
                        static_cast<sptr>(name_end - frame_descr)));
-  Printf("Address %p is located at offset %zu "
-         "in frame <%s> of T%d's stack:\n",
-         addr, offset, buf, t->tid());
+  AsanPrintf("Address %p is located at offset %zu "
+             "in frame <%s> of T%d's stack:\n",
+             (void*)addr, offset, buf, t->tid());
   // Report the number of stack objects.
   char *p;
   uptr n_objects = internal_simple_strtoll(name_end, &p, 10);
   CHECK(n_objects > 0);
-  Printf("  This frame has %zu object(s):\n", n_objects);
+  AsanPrintf("  This frame has %zu object(s):\n", n_objects);
   // Report all objects in this frame.
   for (uptr i = 0; i < n_objects; i++) {
     uptr beg, size;
@@ -198,19 +183,19 @@ static bool DescribeStackAddress(uptr addr, uptr access_size) {
     size = internal_simple_strtoll(p, &p, 10);
     len  = internal_simple_strtoll(p, &p, 10);
     if (beg <= 0 || size <= 0 || len < 0 || *p != ' ') {
-      Printf("AddressSanitizer can't parse the stack frame descriptor: |%s|\n",
-             frame_descr);
+      AsanPrintf("AddressSanitizer can't parse the stack frame "
+                 "descriptor: |%s|\n", frame_descr);
       break;
     }
     p++;
     buf[0] = 0;
     internal_strncat(buf, p, Min(kBufSize, len));
     p += len;
-    Printf("    [%zu, %zu) '%s'\n", beg, beg + size, buf);
+    AsanPrintf("    [%zu, %zu) '%s'\n", beg, beg + size, buf);
   }
-  Printf("HINT: this may be a false positive if your program uses "
-         "some custom stack unwind mechanism\n"
-         "      (longjmp and C++ exceptions *are* supported)\n");
+  AsanPrintf("HINT: this may be a false positive if your program uses "
+             "some custom stack unwind mechanism\n"
+             "      (longjmp and C++ exceptions *are* supported)\n");
   t->summary()->Announce();
   return true;
 }
@@ -230,7 +215,7 @@ static NOINLINE void DescribeAddress(uptr addr, uptr access_size) {
 // -------------------------- Run-time entry ------------------- {{{1
 // exported functions
 #define ASAN_REPORT_ERROR(type, is_write, size)                     \
-extern "C" NOINLINE ASAN_INTERFACE_ATTRIBUTE                        \
+extern "C" NOINLINE INTERFACE_ATTRIBUTE                        \
 void __asan_report_ ## type ## size(uptr addr);                \
 void __asan_report_ ## type ## size(uptr addr) {               \
   GET_CALLER_PC_BP_SP;                                              \
@@ -315,14 +300,8 @@ static void BoolFlagValue(const char *flags, const char *flag,
 }
 
 static void asan_atexit() {
-  Printf("AddressSanitizer exit stats:\n");
+  AsanPrintf("AddressSanitizer exit stats:\n");
   __asan_print_accumulated_stats();
-}
-
-void CheckFailed(const char *cond, const char *file, int line) {
-  Report("CHECK failed: %s at %s:%d\n", cond, file, line);
-  PRINT_CURRENT_STACK();
-  ShowStatsAndAbort();
 }
 
 }  // namespace __asan
@@ -354,7 +333,7 @@ void NOINLINE __asan_set_error_report_callback(void (*callback)(const char*)) {
   if (callback) {
     error_message_buffer_size = 1 << 16;
     error_message_buffer =
-        (char*)AsanMmapSomewhereOrDie(error_message_buffer_size, __FUNCTION__);
+        (char*)MmapOrDie(error_message_buffer_size, __FUNCTION__);
     error_message_buffer_pos = 0;
   }
 }
@@ -365,7 +344,8 @@ void __asan_report_error(uptr pc, uptr bp, uptr sp,
   static int num_calls = 0;
   if (AtomicInc(&num_calls) > 1) return;
 
-  Printf("=================================================================\n");
+  AsanPrintf("===================================================="
+             "=============\n");
   const char *bug_descr = "unknown-crash";
   if (AddrIsInMem(addr)) {
     u8 *shadow_addr = (u8*)MemToShadow(addr);
@@ -404,7 +384,7 @@ void __asan_report_error(uptr pc, uptr bp, uptr sp,
   }
 
   AsanThread *curr_thread = asanThreadRegistry().GetCurrent();
-  int curr_tid = asanThreadRegistry().GetCurrentTidOrMinusOne();
+  u32 curr_tid = asanThreadRegistry().GetCurrentTidOrInvalid();
 
   if (curr_thread) {
     // We started reporting an error message. Stop using the fake stack
@@ -412,13 +392,13 @@ void __asan_report_error(uptr pc, uptr bp, uptr sp,
     curr_thread->fake_stack().StopUsingFakeStack();
   }
 
-  Report("ERROR: AddressSanitizer %s on address "
-         "%p at pc 0x%zx bp 0x%zx sp 0x%zx\n",
-         bug_descr, addr, pc, bp, sp);
+  AsanReport("ERROR: AddressSanitizer %s on address "
+             "%p at pc 0x%zx bp 0x%zx sp 0x%zx\n",
+             bug_descr, (void*)addr, pc, bp, sp);
 
-  Printf("%s of size %zu at %p thread T%d\n",
-         access_size ? (is_write ? "WRITE" : "READ") : "ACCESS",
-         access_size, addr, curr_tid);
+  AsanPrintf("%s of size %zu at %p thread T%d\n",
+             access_size ? (is_write ? "WRITE" : "READ") : "ACCESS",
+             access_size, (void*)addr, curr_tid);
 
   if (FLAG_debug) {
     PrintBytes("PC: ", (uptr*)pc);
@@ -432,13 +412,13 @@ void __asan_report_error(uptr pc, uptr bp, uptr sp,
   DescribeAddress(addr, access_size);
 
   uptr shadow_addr = MemToShadow(addr);
-  Report("ABORTING\n");
+  AsanReport("ABORTING\n");
   __asan_print_accumulated_stats();
-  Printf("Shadow byte and word:\n");
-  Printf("  %p: %x\n", shadow_addr, *(unsigned char*)shadow_addr);
+  AsanPrintf("Shadow byte and word:\n");
+  AsanPrintf("  %p: %x\n", (void*)shadow_addr, *(unsigned char*)shadow_addr);
   uptr aligned_shadow = shadow_addr & ~(kWordSize - 1);
   PrintBytes("  ", (uptr*)(aligned_shadow));
-  Printf("More shadow bytes:\n");
+  AsanPrintf("More shadow bytes:\n");
   PrintBytes("  ", (uptr*)(aligned_shadow-4*kWordSize));
   PrintBytes("  ", (uptr*)(aligned_shadow-3*kWordSize));
   PrintBytes("  ", (uptr*)(aligned_shadow-2*kWordSize));
@@ -451,7 +431,7 @@ void __asan_report_error(uptr pc, uptr bp, uptr sp,
   if (error_report_callback) {
     error_report_callback(error_message_buffer);
   }
-  AsanDie();
+  Die();
 }
 
 static void ParseAsanOptions(const char *options) {
@@ -465,8 +445,8 @@ static void ParseAsanOptions(const char *options) {
   IntFlagValue(options, "verbosity=", &FLAG_v);
 
   IntFlagValue(options, "redzone=", (s64*)&FLAG_redzone);
-  CHECK(FLAG_redzone >= 32);
-  CHECK((FLAG_redzone & (FLAG_redzone - 1)) == 0);
+  CHECK(FLAG_redzone >= 16);
+  CHECK(IsPowerOfTwo(FLAG_redzone));
   IntFlagValue(options, "quarantine_size=", (s64*)&FLAG_quarantine_size);
 
   IntFlagValue(options, "atexit=", &FLAG_atexit);
@@ -531,19 +511,21 @@ void __asan_init() {
   ReplaceOperatorsNewAndDelete();
 
   if (FLAG_v) {
-    Printf("|| `[%p, %p]` || HighMem    ||\n", kHighMemBeg, kHighMemEnd);
+    Printf("|| `[%p, %p]` || HighMem    ||\n",
+           (void*)kHighMemBeg, (void*)kHighMemEnd);
     Printf("|| `[%p, %p]` || HighShadow ||\n",
-           kHighShadowBeg, kHighShadowEnd);
+           (void*)kHighShadowBeg, (void*)kHighShadowEnd);
     Printf("|| `[%p, %p]` || ShadowGap  ||\n",
-           kShadowGapBeg, kShadowGapEnd);
+           (void*)kShadowGapBeg, (void*)kShadowGapEnd);
     Printf("|| `[%p, %p]` || LowShadow  ||\n",
-           kLowShadowBeg, kLowShadowEnd);
-    Printf("|| `[%p, %p]` || LowMem     ||\n", kLowMemBeg, kLowMemEnd);
+           (void*)kLowShadowBeg, (void*)kLowShadowEnd);
+    Printf("|| `[%p, %p]` || LowMem     ||\n",
+           (void*)kLowMemBeg, (void*)kLowMemEnd);
     Printf("MemToShadow(shadow): %p %p %p %p\n",
-           MEM_TO_SHADOW(kLowShadowBeg),
-           MEM_TO_SHADOW(kLowShadowEnd),
-           MEM_TO_SHADOW(kHighShadowBeg),
-           MEM_TO_SHADOW(kHighShadowEnd));
+           (void*)MEM_TO_SHADOW(kLowShadowBeg),
+           (void*)MEM_TO_SHADOW(kLowShadowEnd),
+           (void*)MEM_TO_SHADOW(kHighShadowBeg),
+           (void*)MEM_TO_SHADOW(kHighShadowEnd));
     Printf("red_zone=%zu\n", (uptr)FLAG_redzone);
     Printf("malloc_context_size=%zu\n", (uptr)FLAG_malloc_context_size);
 
@@ -571,7 +553,7 @@ void __asan_init() {
     Report("Shadow memory range interleaves with an existing memory mapping. "
            "ASan cannot proceed correctly. ABORTING.\n");
     AsanDumpProcessMap();
-    AsanDie();
+    Die();
   }
 
   InstallSignalHandlers();

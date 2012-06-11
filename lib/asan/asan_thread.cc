@@ -1,4 +1,4 @@
-//===-- asan_thread.cc ------------------------------------------*- C++ -*-===//
+//===-- asan_thread.cc ----------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -18,6 +18,7 @@
 #include "asan_thread.h"
 #include "asan_thread_registry.h"
 #include "asan_mapping.h"
+#include "sanitizer_common/sanitizer_common.h"
 
 namespace __asan {
 
@@ -26,10 +27,10 @@ AsanThread::AsanThread(LinkerInitialized x)
       malloc_storage_(x),
       stats_(x) { }
 
-AsanThread *AsanThread::Create(int parent_tid, thread_callback_t start_routine,
+AsanThread *AsanThread::Create(u32 parent_tid, thread_callback_t start_routine,
                                void *arg, AsanStackTrace *stack) {
   uptr size = RoundUpTo(sizeof(AsanThread), kPageSize);
-  AsanThread *thread = (AsanThread*)AsanMmapSomewhereOrDie(size, __FUNCTION__);
+  AsanThread *thread = (AsanThread*)MmapOrDie(size, __FUNCTION__);
   thread->start_routine_ = start_routine;
   thread->arg_ = arg;
 
@@ -63,7 +64,7 @@ void AsanThread::Destroy() {
   ClearShadowForThreadStack();
   fake_stack().Cleanup();
   uptr size = RoundUpTo(sizeof(AsanThread), kPageSize);
-  AsanUnmapOrDie(this, size);
+  UnmapOrDie(this, size);
 }
 
 void AsanThread::Init() {
@@ -74,7 +75,7 @@ void AsanThread::Init() {
   if (FLAG_v >= 1) {
     int local = 0;
     Report("T%d: stack [%p,%p) size 0x%zx; local=%p\n",
-           tid(), stack_bottom_, stack_top_,
+           tid(), (void*)stack_bottom_, (void*)stack_top_,
            stack_top_ - stack_bottom_, &local);
   }
   fake_stack_.Init(stack_size());
@@ -99,6 +100,12 @@ thread_return_t AsanThread::ThreadStart() {
   this->Destroy();
 
   return res;
+}
+
+void AsanThread::SetThreadStackTopAndBottom() {
+  GetThreadStackTopAndBottom(tid() == 0, &stack_top_, &stack_bottom_);
+  int local;
+  CHECK(AddrIsInStack((uptr)&local));
 }
 
 void AsanThread::ClearShadowForThreadStack() {

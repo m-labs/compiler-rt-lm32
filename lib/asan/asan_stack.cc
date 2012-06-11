@@ -1,4 +1,4 @@
-//===-- asan_stack.cc -------------------------------------------*- C++ -*-===//
+//===-- asan_stack.cc -----------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -17,6 +17,8 @@
 #include "asan_stack.h"
 #include "asan_thread.h"
 #include "asan_thread_registry.h"
+#include "sanitizer_common/sanitizer_procmaps.h"
+#include "sanitizer_common/sanitizer_symbolizer.h"
 
 #ifdef ASAN_USE_EXTERNAL_SYMBOLIZER
 extern bool
@@ -32,23 +34,39 @@ void AsanStackTrace::PrintStack(uptr *addr, uptr size) {
     uptr pc = addr[i];
     char buff[4096];
     ASAN_USE_EXTERNAL_SYMBOLIZER((void*)pc, buff, sizeof(buff));
-    Printf("  #%zu 0x%zx %s\n", i, pc, buff);
+    AsanPrintf("  #%zu 0x%zx %s\n", i, pc, buff);
   }
 }
 
 #else  // ASAN_USE_EXTERNAL_SYMBOLIZER
 void AsanStackTrace::PrintStack(uptr *addr, uptr size) {
-  AsanProcMaps proc_maps;
+  ProcessMaps proc_maps;
+  uptr frame_num = 0;
   for (uptr i = 0; i < size && addr[i]; i++) {
     proc_maps.Reset();
     uptr pc = addr[i];
     uptr offset;
     char filename[4096];
-    if (proc_maps.GetObjectNameAndOffset(pc, &offset,
-                                         filename, sizeof(filename))) {
-      Printf("    #%zu 0x%zx (%s+0x%zx)\n", i, pc, filename, offset);
+    if (FLAG_symbolize) {
+      AddressInfoList *address_info_list = SymbolizeCode(pc);
+      for (AddressInfoList *entry = address_info_list; entry;
+           entry = entry->next) {
+        AddressInfo info = entry->info;
+        AsanPrintf("    #%zu 0x%zx %s:%d:%d\n", frame_num, pc,
+                                                (info.file) ? info.file : "",
+                                                info.line, info.column);
+        frame_num++;
+      }
+      address_info_list->Clear();
     } else {
-      Printf("    #%zu 0x%zx\n", i, pc);
+      if (proc_maps.GetObjectNameAndOffset(pc, &offset,
+                                           filename, sizeof(filename))) {
+        AsanPrintf("    #%zu 0x%zx (%s+0x%zx)\n", frame_num, pc, filename,
+                                                  offset);
+      } else {
+        AsanPrintf("    #%zu 0x%zx\n", frame_num, pc);
+      }
+      frame_num++;
     }
   }
 }

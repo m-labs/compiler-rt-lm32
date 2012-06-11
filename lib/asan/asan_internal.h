@@ -14,7 +14,8 @@
 #ifndef ASAN_INTERNAL_H
 #define ASAN_INTERNAL_H
 
-#include "sanitizer_common/sanitizer_defs.h"
+#include "sanitizer_common/sanitizer_common.h"
+#include "sanitizer_common/sanitizer_internal_defs.h"
 #include "sanitizer_common/sanitizer_libc.h"
 
 #if !defined(__linux__) && !defined(__APPLE__) && !defined(_WIN32)
@@ -22,38 +23,9 @@
 #endif
 
 #if defined(_WIN32)
-
-typedef unsigned long    DWORD;  // NOLINT
-
 extern "C" void* _ReturnAddress(void);
 # pragma intrinsic(_ReturnAddress)
-
-# define ALIAS(x)   // TODO(timurrrr): do we need this on Windows?
-# define ALIGNED(x) __declspec(align(x))
-# define NOINLINE __declspec(noinline)
-# define NORETURN __declspec(noreturn)
-
-# define ASAN_INTERFACE_ATTRIBUTE  // TODO(timurrrr): do we need this on Win?
-#else  // defined(_WIN32)
-// #include <stdint.h>
-
-# define ALIAS(x) __attribute__((alias(x)))
-# define ALIGNED(x) __attribute__((aligned(x)))
-# define NOINLINE __attribute__((noinline))
-# define NORETURN  __attribute__((noreturn))
-
-# define ASAN_INTERFACE_ATTRIBUTE __attribute__((visibility("default")))
 #endif  // defined(_WIN32)
-
-// If __WORDSIZE was undefined by the platform, define it in terms of the
-// compiler built-ins __LP64__ and _WIN64.
-#ifndef __WORDSIZE
-#if __LP64__ || defined(_WIN64)
-#define __WORDSIZE 64
-#else
-#define __WORDSIZE 32
-#endif
-#endif
 
 // Limits for integral types. We have to redefine it in case we don't
 // have stdint.h (like in Visual Studio 9).
@@ -99,10 +71,6 @@ extern "C" void* _ReturnAddress(void);
 
 #define ASAN_POSIX (ASAN_LINUX || ASAN_MAC)
 
-#if !defined(__has_feature)
-#define __has_feature(x) 0
-#endif
-
 #if __has_feature(address_sanitizer)
 # error "The AddressSanitizer run-time should not be"
         " instrumented by AddressSanitizer"
@@ -142,7 +110,6 @@ class AsanThread;
 struct AsanStackTrace;
 
 // asan_rtl.cc
-void NORETURN CheckFailed(const char *cond, const char *file, int line);
 void NORETURN ShowStatsAndAbort();
 
 // asan_globals.cc
@@ -152,55 +119,37 @@ void ReplaceOperatorsNewAndDelete();
 // asan_malloc_linux.cc / asan_malloc_mac.cc
 void ReplaceSystemMalloc();
 
-void OutOfMemoryMessageAndDie(const char *mem_type, uptr size);
-
 // asan_linux.cc / asan_mac.cc / asan_win.cc
 void *AsanDoesNotSupportStaticLinkage();
 bool AsanShadowRangeIsAvailable();
-int AsanOpenReadonly(const char* filename);
 const char *AsanGetEnv(const char *name);
 void AsanDumpProcessMap();
 
 void *AsanMmapFixedNoReserve(uptr fixed_addr, uptr size);
 void *AsanMmapFixedReserve(uptr fixed_addr, uptr size);
 void *AsanMprotect(uptr fixed_addr, uptr size);
-void *AsanMmapSomewhereOrDie(uptr size, const char *where);
-void AsanUnmapOrDie(void *ptr, uptr size);
 
 void AsanDisableCoreDumper();
 void GetPcSpBp(void *context, uptr *pc, uptr *sp, uptr *bp);
-
-uptr AsanRead(int fd, void *buf, uptr count);
-uptr AsanWrite(int fd, const void *buf, uptr count);
-int AsanClose(int fd);
 
 bool AsanInterceptsSignal(int signum);
 void SetAlternateSignalStack();
 void UnsetAlternateSignalStack();
 void InstallSignalHandlers();
-int GetPid();
 uptr GetThreadSelf();
 int AtomicInc(int *a);
 u16 AtomicExchange(u16 *a, u16 new_val);
+u8 AtomicExchange(u8 *a, u8 new_val);
 
 // Wrapper for TLS/TSD.
 void AsanTSDInit(void (*destructor)(void *tsd));
 void *AsanTSDGet();
 void AsanTSDSet(void *tsd);
 
-// Opens the file 'file_name" and reads up to 'max_len' bytes.
-// The resulting buffer is mmaped and stored in '*buff'.
-// The size of the mmaped region is stored in '*buff_size',
-// Returns the number of read bytes or 0 if file can not be opened.
-uptr ReadFileToBuffer(const char *file_name, char **buff,
-                        uptr *buff_size, uptr max_len);
-
+void AppendToErrorMessageBuffer(const char *buffer);
 // asan_printf.cc
-void RawWrite(const char *buffer);
-int SNPrintf(char *buffer, uptr length, const char *format, ...);
-void Printf(const char *format, ...);
-int SScanf(const char *str, const char *format, ...);
-void Report(const char *format, ...);
+void AsanPrintf(const char *format, ...);
+void AsanReport(const char *format, ...);
 
 // Don't use std::min and std::max, to minimize dependency on libstdc++.
 template<class T> T Min(T a, T b) { return a < b ? a : b; }
@@ -248,40 +197,22 @@ extern s64 FLAG_sleep_before_dying;
 extern bool    FLAG_handle_segv;
 extern bool    FLAG_use_sigaltstack;
 extern bool    FLAG_check_malloc_usable_size;
+extern bool    FLAG_unmap_shadow_on_exit;
+extern bool    FLAG_abort_on_error;
 
 extern int asan_inited;
 // Used to avoid infinite recursion in __asan_init().
 extern bool asan_init_is_running;
+extern void (*death_callback)(void);
 
 enum LinkerInitialized { LINKER_INITIALIZED = 0 };
 
-void NORETURN AsanDie();
 void SleepForSeconds(int seconds);
 void NORETURN Exit(int exitcode);
 void NORETURN Abort();
 int Atexit(void (*function)(void));
 
-#define CHECK(cond) do { if (!(cond)) { \
-  CheckFailed(#cond, __FILE__, __LINE__); \
-}}while(0)
-
-#define RAW_CHECK_MSG(expr, msg) do { \
-  if (!(expr)) { \
-    RawWrite(msg); \
-    AsanDie(); \
-  } \
-} while (0)
-
-#define RAW_CHECK(expr) RAW_CHECK_MSG(expr, #expr)
-
-#define UNIMPLEMENTED() CHECK("unimplemented" && 0)
-
 #define ASAN_ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
-
-const uptr kWordSize = __WORDSIZE / 8;
-const uptr kWordSizeInBits = 8 * kWordSize;
-const uptr kPageSizeBits = 12;
-const uptr kPageSize = 1UL << kPageSizeBits;
 
 #if !defined(_WIN32) || defined(__clang__)
 # define GET_CALLER_PC() (uptr)__builtin_return_address(0)
@@ -326,16 +257,6 @@ const int kAsanInternalHeapMagic = 0xfe;
 
 static const uptr kCurrentStackFrameMagic = 0x41B58AB3;
 static const uptr kRetiredStackFrameMagic = 0x45E0360E;
-
-// --------------------------- Bit twiddling ------- {{{1
-inline bool IsPowerOfTwo(uptr x) {
-  return (x & (x - 1)) == 0;
-}
-
-inline uptr RoundUpTo(uptr size, uptr boundary) {
-  CHECK(IsPowerOfTwo(boundary));
-  return (size + boundary - 1) & ~(boundary - 1);
-}
 
 // -------------------------- LowLevelAllocator ----- {{{1
 // A simple low-level memory allocator for internal use.

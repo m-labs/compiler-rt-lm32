@@ -1,4 +1,4 @@
-//===-- asan_interceptors.cc ------------------------------------*- C++ -*-===//
+//===-- asan_interceptors.cc ----------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -21,6 +21,7 @@
 #include "asan_stats.h"
 #include "asan_thread_registry.h"
 #include "interception/interception.h"
+#include "sanitizer_common/sanitizer_libc.h"
 
 // Use macro to describe if specific function should be
 // intercepted on a given platform.
@@ -70,6 +71,7 @@ char* strchr(const char *str, int c);
 char* index(const char *string, int c);
 # endif
 char* strcat(char *to, const char* from);  // NOLINT
+char *strncat(char *to, const char* from, uptr size);
 char* strcpy(char *to, const char* from);  // NOLINT
 char* strncpy(char *to, const char* from, uptr size);
 int strcmp(const char *s1, const char* s2);
@@ -154,9 +156,9 @@ static inline bool RangesOverlap(const char *offset1, uptr length1,
   const char *offset1 = (const char*)_offset1; \
   const char *offset2 = (const char*)_offset2; \
   if (RangesOverlap(offset1, length1, offset2, length2)) { \
-    Report("ERROR: AddressSanitizer %s-param-overlap: " \
-           "memory ranges [%p,%p) and [%p, %p) overlap\n", \
-           name, offset1, offset1 + length1, offset2, offset2 + length2); \
+    AsanReport("ERROR: AddressSanitizer %s-param-overlap: " \
+               "memory ranges [%p,%p) and [%p, %p) overlap\n", \
+               name, offset1, offset1 + length1, offset2, offset2 + length2); \
     PRINT_CURRENT_STACK(); \
     ShowStatsAndAbort(); \
   } \
@@ -219,12 +221,6 @@ s64 internal_atoll(const char *nptr) {
   return internal_simple_strtoll(nptr, (char**)0, 10);
 }
 
-uptr internal_strlen(const char *s) {
-  uptr i = 0;
-  while (s[i]) i++;
-  return i;
-}
-
 uptr internal_strnlen(const char *s, uptr maxlen) {
 #if ASAN_INTERCEPT_STRNLEN
   if (REAL(strnlen) != 0) {
@@ -246,14 +242,6 @@ char* internal_strchr(const char *s, int c) {
   }
 }
 
-void* internal_memchr(const void* s, int c, uptr n) {
-  const char* t = (char*)s;
-  for (uptr i = 0; i < n; ++i, ++t)
-    if (*t == c)
-      return (void*)t;
-  return 0;
-}
-
 int internal_memcmp(const void* s1, const void* s2, uptr n) {
   const char* t1 = (char*)s1;
   const char* t2 = (char*)s2;
@@ -261,19 +249,6 @@ int internal_memcmp(const void* s1, const void* s2, uptr n) {
     if (*t1 != *t2)
       return *t1 < *t2 ? -1 : 1;
   return 0;
-}
-
-// Should not be used in performance-critical places.
-void* internal_memset(void* s, int c, uptr n) {
-  // The next line prevents Clang from making a call to memset() instead of the
-  // loop below.
-  // FIXME: building the runtime with -ffreestanding is a better idea. However
-  // there currently are linktime problems due to PR12396.
-  char volatile *t = (char*)s;
-  for (uptr i = 0; i < n; ++i, ++t) {
-    *t = c;
-  }
-  return s;
 }
 
 char *internal_strstr(const char *haystack, const char *needle) {
@@ -297,25 +272,6 @@ char *internal_strncat(char *dst, const char *src, uptr n) {
   return dst;
 }
 
-int internal_strcmp(const char *s1, const char *s2) {
-  while (true) {
-    unsigned c1 = *s1;
-    unsigned c2 = *s2;
-    if (c1 != c2) return (c1 < c2) ? -1 : 1;
-    if (c1 == 0) break;
-    s1++;
-    s2++;
-  }
-  return 0;
-}
-
-char *internal_strncpy(char *dst, const char *src, uptr n) {
-  uptr i;
-  for (i = 0; i < n && src[i]; i++)
-    dst[i] = src[i];
-  return dst;
-}
-
 }  // namespace __asan
 
 // ---------------------- Wrappers ---------------- {{{1
@@ -331,7 +287,7 @@ static thread_return_t THREAD_CALLING_CONV asan_thread_start(void *arg) {
 INTERCEPTOR(int, pthread_create, void *thread,
     void *attr, void *(*start_routine)(void*), void *arg) {
   GET_STACK_TRACE_HERE(kStackTraceMax);
-  int current_tid = asanThreadRegistry().GetCurrentTidOrMinusOne();
+  u32 current_tid = asanThreadRegistry().GetCurrentTidOrInvalid();
   AsanThread *t = AsanThread::Create(current_tid, start_routine, arg, &stack);
   asanThreadRegistry().RegisterThread(t);
   return REAL(pthread_create)(thread, attr, asan_thread_start, t);
@@ -470,6 +426,9 @@ INTERCEPTOR(void*, memcpy, void *to, const void *from, uptr size) {
 }
 
 INTERCEPTOR(void*, memmove, void *to, const void *from, uptr size) {
+  if (asan_init_is_running) {
+    return REAL(memmove)(to, from, size);
+  }
   ENSURE_ASAN_INITED();
   if (FLAG_replace_intrin) {
     ASAN_WRITE_RANGE(from, size);
@@ -534,6 +493,22 @@ INTERCEPTOR(char*, strcat, char *to, const char *from) {  // NOLINT
     }
   }
   return REAL(strcat)(to, from);  // NOLINT
+}
+
+INTERCEPTOR(char*, strncat, char *to, const char *from, uptr size) {
+  ENSURE_ASAN_INITED();
+  if (FLAG_replace_str && size > 0) {
+    uptr from_length = internal_strnlen(from, size);
+    ASAN_READ_RANGE(from, Min(size, from_length + 1));
+    uptr to_length = REAL(strlen)(to);
+    ASAN_READ_RANGE(to, to_length);
+    ASAN_WRITE_RANGE(to + to_length, from_length + 1);
+    if (from_length > 0) {
+      CHECK_RANGES_OVERLAP("strncat", to, to_length + 1,
+                           from, Min(size, from_length + 1));
+    }
+  }
+  return REAL(strncat)(to, from, size);
 }
 
 INTERCEPTOR(int, strcmp, const char *s1, const char *s2) {
@@ -754,7 +729,7 @@ INTERCEPTOR_WINAPI(DWORD, CreateThread,
                    DWORD (__stdcall *start_routine)(void*), void* arg,
                    DWORD flags, void* tid) {
   GET_STACK_TRACE_HERE(kStackTraceMax);
-  int current_tid = asanThreadRegistry().GetCurrentTidOrMinusOne();
+  u32 current_tid = asanThreadRegistry().GetCurrentTidOrInvalid();
   AsanThread *t = AsanThread::Create(current_tid, start_routine, arg, &stack);
   asanThreadRegistry().RegisterThread(t);
   return REAL(CreateThread)(security, stack_size,
@@ -791,6 +766,7 @@ void InitializeAsanInterceptors() {
   ASAN_INTERCEPT_FUNC(strcmp);
   ASAN_INTERCEPT_FUNC(strcpy);  // NOLINT
   ASAN_INTERCEPT_FUNC(strlen);
+  ASAN_INTERCEPT_FUNC(strncat);
   ASAN_INTERCEPT_FUNC(strncmp);
   ASAN_INTERCEPT_FUNC(strncpy);
 #if !defined(_WIN32)

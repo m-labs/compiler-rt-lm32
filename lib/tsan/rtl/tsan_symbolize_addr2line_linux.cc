@@ -1,4 +1,4 @@
-//===-- tsan_symbolize_addr2line.cc -----------------------------*- C++ -*-===//
+//===-- tsan_symbolize_addr2line.cc ---------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -10,6 +10,8 @@
 // This file is a part of ThreadSanitizer (TSan), a race detector.
 //
 //===----------------------------------------------------------------------===//
+#include "sanitizer_common/sanitizer_common.h"
+#include "sanitizer_common/sanitizer_libc.h"
 #include "tsan_symbolize.h"
 #include "tsan_mman.h"
 #include "tsan_rtl.h"
@@ -48,12 +50,12 @@ struct DlIteratePhdrCtx {
 static void NOINLINE InitModule(ModuleDesc *m) {
   int outfd[2] = {};
   if (pipe(&outfd[0])) {
-    Printf("ThreadSanitizer: outfd pipe() failed (%d)\n", errno);
+    TsanPrintf("ThreadSanitizer: outfd pipe() failed (%d)\n", errno);
     Die();
   }
   int infd[2] = {};
   if (pipe(&infd[0])) {
-    Printf("ThreadSanitizer: infd pipe() failed (%d)\n", errno);
+    TsanPrintf("ThreadSanitizer: infd pipe() failed (%d)\n", errno);
     Die();
   }
   int pid = fork();
@@ -70,7 +72,7 @@ static void NOINLINE InitModule(ModuleDesc *m) {
     execl("/usr/bin/addr2line", "/usr/bin/addr2line", "-Cfe", m->fullname, 0);
     _exit(0);
   } else if (pid < 0) {
-    Printf("ThreadSanitizer: failed to fork symbolizer\n");
+    TsanPrintf("ThreadSanitizer: failed to fork symbolizer\n");
     Die();
   }
   internal_close(outfd[0]);
@@ -83,7 +85,7 @@ static int dl_iterate_phdr_cb(dl_phdr_info *info, size_t size, void *arg) {
   DlIteratePhdrCtx *ctx = (DlIteratePhdrCtx*)arg;
   InternalScopedBuf<char> tmp(128);
   if (ctx->is_first) {
-    Snprintf(tmp.Ptr(), tmp.Size(), "/proc/%d/exe", (int)getpid());
+    SNPrintf(tmp.Ptr(), tmp.Size(), "/proc/%d/exe", GetPid());
     info->dlpi_name = tmp.Ptr();
   }
   ctx->is_first = false;
@@ -100,13 +102,14 @@ static int dl_iterate_phdr_cb(dl_phdr_info *info, size_t size, void *arg) {
   m->base = (uptr)info->dlpi_addr;
   m->inp_fd = -1;
   m->out_fd = -1;
-  DPrintf("Module %s %lx\n", m->name, m->base);
+  DPrintf("Module %s %zx\n", m->name, m->base);
   for (int i = 0; i < info->dlpi_phnum; i++) {
     const Elf64_Phdr *s = &info->dlpi_phdr[i];
-    DPrintf("  Section p_type=%llx p_offset=%llx p_vaddr=%llx p_paddr=%llx"
-        " p_filesz=%llx p_memsz=%llx p_flags=%llx p_align=%llx\n",
-        (u64)s->p_type, (u64)s->p_offset, (u64)s->p_vaddr, (u64)s->p_paddr,
-        (u64)s->p_filesz, (u64)s->p_memsz, (u64)s->p_flags, (u64)s->p_align);
+    DPrintf("  Section p_type=%zx p_offset=%zx p_vaddr=%zx p_paddr=%zx"
+            " p_filesz=%zx p_memsz=%zx p_flags=%zx p_align=%zx\n",
+            (uptr)s->p_type, (uptr)s->p_offset, (uptr)s->p_vaddr,
+            (uptr)s->p_paddr, (uptr)s->p_filesz, (uptr)s->p_memsz,
+            (uptr)s->p_flags, (uptr)s->p_align);
     if (s->p_type != PT_LOAD)
       continue;
     SectionDesc *sec = (SectionDesc*)internal_alloc(MBlockReportStack,
@@ -116,7 +119,7 @@ static int dl_iterate_phdr_cb(dl_phdr_info *info, size_t size, void *arg) {
     sec->end = sec->base + s->p_memsz;
     sec->next = ctx->sections;
     ctx->sections = sec;
-    DPrintf("  Section %lx-%lx\n", sec->base, sec->end);
+    DPrintf("  Section %zx-%zx\n", sec->base, sec->end);
   }
   return 0;
 }
@@ -144,7 +147,7 @@ static SectionDesc *GetSectionDesc(uptr addr) {
 static ReportStack *NewFrame(uptr addr) {
   ReportStack *ent = (ReportStack*)internal_alloc(MBlockReportStack,
                                                   sizeof(ReportStack));
-  internal_memset(ent, 0, sizeof(*ent));
+  real_memset(ent, 0, sizeof(*ent));
   ent->pc = addr;
   return ent;
 }
@@ -156,16 +159,16 @@ ReportStack *SymbolizeCode(uptr addr) {
   ModuleDesc *m = s->module;
   uptr offset = addr - m->base;
   char addrstr[32];
-  Snprintf(addrstr, sizeof(addrstr), "%p\n", (void*)offset);
+  SNPrintf(addrstr, sizeof(addrstr), "%p\n", (void*)offset);
   if (0 >= internal_write(m->out_fd, addrstr, internal_strlen(addrstr))) {
-    Printf("ThreadSanitizer: can't write from symbolizer (%d, %d)\n",
+    TsanPrintf("ThreadSanitizer: can't write from symbolizer (%d, %d)\n",
         m->out_fd, errno);
     Die();
   }
   InternalScopedBuf<char> func(1024);
   ssize_t len = internal_read(m->inp_fd, func, func.Size() - 1);
   if (len <= 0) {
-    Printf("ThreadSanitizer: can't read from symbolizer (%d, %d)\n",
+    TsanPrintf("ThreadSanitizer: can't read from symbolizer (%d, %d)\n",
         m->inp_fd, errno);
     Die();
   }
@@ -176,12 +179,12 @@ ReportStack *SymbolizeCode(uptr addr) {
   char *pos = (char*)internal_strchr(func, '\n');
   if (pos && func[0] != '?') {
     res->func = (char*)internal_alloc(MBlockReportStack, pos - func + 1);
-    internal_memcpy(res->func, func, pos - func);
+    real_memcpy(res->func, func, pos - func);
     res->func[pos - func] = 0;
     char *pos2 = (char*)internal_strchr(pos, ':');
     if (pos2) {
       res->file = (char*)internal_alloc(MBlockReportStack, pos2 - pos - 1 + 1);
-      internal_memcpy(res->file, pos + 1, pos2 - pos - 1);
+      real_memcpy(res->file, pos + 1, pos2 - pos - 1);
       res->file[pos2 - pos - 1] = 0;
       res->line = atoi(pos2 + 1);
      }
@@ -196,8 +199,8 @@ ReportStack *SymbolizeData(uptr addr) {
     base = GetImageBase();
   int res = 0;
   InternalScopedBuf<char> cmd(1024);
-  Snprintf(cmd, cmd.Size(),
-  "nm -alC %s|grep \"%lx\"|awk '{printf(\"%%s\\n%%s\", $3, $4)}' > tsan.tmp2",
+  SNPrintf(cmd, cmd.Size(),
+  "nm -alC %s|grep \"%zx\"|awk '{printf(\"%%s\\n%%s\", $3, $4)}' > tsan.tmp2",
     exe, (addr - base));
   if (system(cmd))
     return 0;
@@ -212,14 +215,14 @@ ReportStack *SymbolizeData(uptr addr) {
       symb[0].module = 0;
       symb[0].offset = addr;
       symb[0].name = alloc->Alloc<char>(pos - tmp + 1);
-      internal_memcpy(symb[0].name, tmp, pos - tmp);
+      real_memcpy(symb[0].name, tmp, pos - tmp);
       symb[0].name[pos - tmp] = 0;
       symb[0].file = 0;
       symb[0].line = 0;
       char *pos2 = strchr(pos, ':');
       if (pos2) {
         symb[0].file = alloc->Alloc<char>(pos2 - pos - 1 + 1);
-        internal_memcpy(symb[0].file, pos + 1, pos2 - pos - 1);
+        real_memcpy(symb[0].file, pos + 1, pos2 - pos - 1);
         symb[0].file[pos2 - pos - 1] = 0;
         symb[0].line = atoi(pos2 + 1);
       }

@@ -1,4 +1,4 @@
-//===-- tsan_interface_ann.cc -----------------------------------*- C++ -*-===//
+//===-- tsan_interface_ann.cc ---------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -10,9 +10,10 @@
 // This file is a part of ThreadSanitizer (TSan), a race detector.
 //
 //===----------------------------------------------------------------------===//
+#include "sanitizer_common/sanitizer_libc.h"
+#include "sanitizer_common/sanitizer_placement_new.h"
 #include "tsan_interface_ann.h"
 #include "tsan_mutex.h"
-#include "tsan_placement_new.h"
 #include "tsan_report.h"
 #include "tsan_rtl.h"
 #include "tsan_mman.h"
@@ -82,7 +83,7 @@ struct DynamicAnnContext {
 };
 
 static DynamicAnnContext *dyn_ann_ctx;
-static char dyn_ann_ctx_placeholder[sizeof(DynamicAnnContext)] ALIGN(64);
+static char dyn_ann_ctx_placeholder[sizeof(DynamicAnnContext)] ALIGNED(64);
 
 static void AddExpectRace(ExpectRace *list,
     char *f, int l, uptr addr, uptr size, char *desc) {
@@ -124,7 +125,7 @@ static bool CheckContains(ExpectRace *list, uptr addr, uptr size) {
   ExpectRace *race = FindRace(list, addr, size);
   if (race == 0)
     return false;
-  DPrintf("Hit expected/benign race: %s addr=%lx:%d %s:%d\n",
+  DPrintf("Hit expected/benign race: %s addr=%zx:%d %s:%d\n",
       race->desc, race->addr, (int)race->size, race->file, race->line);
   race->hitcount++;
   return true;
@@ -214,11 +215,11 @@ void AnnotateNoOp(char *f, int l, uptr mem) {
 }
 
 static void ReportMissedExpectedRace(ExpectRace *race) {
-  Printf("==================\n");
-  Printf("WARNING: ThreadSanitizer: missed expected data race\n");
-  Printf("  %s addr=%lx %s:%d\n",
+  TsanPrintf("==================\n");
+  TsanPrintf("WARNING: ThreadSanitizer: missed expected data race\n");
+  TsanPrintf("  %s addr=%zx %s:%d\n",
       race->desc, race->addr, race->file, race->line);
-  Printf("==================\n");
+  TsanPrintf("==================\n");
 }
 
 void AnnotateFlushExpectedRaces(char *f, int l) {
@@ -266,14 +267,14 @@ void AnnotateExpectRace(char *f, int l, uptr mem, char *desc) {
   Lock lock(&dyn_ann_ctx->mtx);
   AddExpectRace(&dyn_ann_ctx->expect,
                 f, l, mem, 1, desc);
-  DPrintf("Add expected race: %s addr=%lx %s:%d\n", desc, mem, f, l);
+  DPrintf("Add expected race: %s addr=%zx %s:%d\n", desc, mem, f, l);
 }
 
 static void BenignRaceImpl(char *f, int l, uptr mem, uptr size, char *desc) {
   Lock lock(&dyn_ann_ctx->mtx);
   AddExpectRace(&dyn_ann_ctx->benign,
                 f, l, mem, size, desc);
-  DPrintf("Add benign race: %s addr=%lx %s:%d\n", desc, mem, f, l);
+  DPrintf("Add benign race: %s addr=%zx %s:%d\n", desc, mem, f, l);
 }
 
 // FIXME: Turn it off later. WTF is benign race?1?? Go talk to Hans Boehm.

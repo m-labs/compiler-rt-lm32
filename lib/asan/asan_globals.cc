@@ -1,4 +1,4 @@
-//===-- asan_globals.cc -----------------------------------------*- C++ -*-===//
+//===-- asan_globals.cc ---------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -66,22 +66,22 @@ void PrintIfASCII(const Global &g) {
     if (!isascii(*(char*)p)) return;
   }
   if (*(char*)(g.beg + g.size - 1) != 0) return;
-  Printf("  '%s' is ascii string '%s'\n", g.name, g.beg);
+  AsanPrintf("  '%s' is ascii string '%s'\n", g.name, (char*)g.beg);
 }
 
 bool DescribeAddrIfMyRedZone(const Global &g, uptr addr) {
   if (addr < g.beg - kGlobalAndStackRedzone) return false;
   if (addr >= g.beg + g.size_with_redzone) return false;
-  Printf("%p is located ", addr);
+  AsanPrintf("%p is located ", (void*)addr);
   if (addr < g.beg) {
-    Printf("%zd bytes to the left", g.beg - addr);
+    AsanPrintf("%zd bytes to the left", g.beg - addr);
   } else if (addr >= g.beg + g.size) {
-    Printf("%zd bytes to the right", addr - (g.beg + g.size));
+    AsanPrintf("%zd bytes to the right", addr - (g.beg + g.size));
   } else {
-    Printf("%zd bytes inside", addr - g.beg);  // Can it happen?
+    AsanPrintf("%zd bytes inside", addr - g.beg);  // Can it happen?
   }
-  Printf(" of global variable '%s' (0x%zx) of size %zu\n",
-         g.name, g.beg, g.size);
+  AsanPrintf(" of global variable '%s' (0x%zx) of size %zu\n",
+             g.name, g.beg, g.size);
   PrintIfASCII(g);
   return true;
 }
@@ -94,8 +94,8 @@ bool DescribeAddrIfGlobal(uptr addr) {
   for (ListOfGlobals *l = list_of_globals; l; l = l->next) {
     const Global &g = *l->g;
     if (FLAG_report_globals >= 2)
-      Printf("Search Global: beg=%p size=%zu name=%s\n",
-             g.beg, g.size, g.name);
+      AsanPrintf("Search Global: beg=%p size=%zu name=%s\n",
+                 (void*)g.beg, g.size, (char*)g.name);
     res |= DescribeAddrIfMyRedZone(g, addr);
   }
   return res;
@@ -118,7 +118,7 @@ static void RegisterGlobal(const Global *g) {
   list_of_globals = l;
   if (FLAG_report_globals >= 2)
     Report("Added Global: beg=%p size=%zu name=%s\n",
-           g->beg, g->size, g->name);
+           (void*)g->beg, g->size, g->name);
 }
 
 static void UnregisterGlobal(const Global *g) {

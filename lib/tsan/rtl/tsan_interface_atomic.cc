@@ -1,4 +1,4 @@
-//===-- tsan_interface_atomic.cc --------------------------------*- C++ -*-===//
+//===-- tsan_interface_atomic.cc ------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -11,8 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "sanitizer_common/sanitizer_placement_new.h"
 #include "tsan_interface_atomic.h"
-#include "tsan_placement_new.h"
 #include "tsan_flags.h"
 #include "tsan_rtl.h"
 

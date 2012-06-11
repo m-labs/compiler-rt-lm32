@@ -37,65 +37,15 @@ void *AsanMmapFixedNoReserve(uptr fixed_addr, uptr size) {
                       MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 }
 
-void *AsanMmapSomewhereOrDie(uptr size, const char *mem_type) {
-  void *rv = VirtualAlloc(0, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-  if (rv == 0)
-    OutOfMemoryMessageAndDie(mem_type, size);
-  return rv;
-}
-
 void *AsanMprotect(uptr fixed_addr, uptr size) {
   return VirtualAlloc((LPVOID)fixed_addr, size,
                       MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
-}
-
-void AsanUnmapOrDie(void *addr, uptr size) {
-  CHECK(VirtualFree(addr, size, MEM_DECOMMIT));
-}
-
-// ---------------------- IO ---------------- {{{1
-uptr AsanWrite(int fd, const void *buf, uptr count) {
-  if (fd != 2)
-    UNIMPLEMENTED();
-
-  HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
-  if (err == 0)
-    return 0;  // FIXME: this might not work on some apps.
-  DWORD ret;
-  if (!WriteFile(err, buf, count, &ret, 0))
-    return 0;
-  return ret;
-}
-
-// FIXME: Looks like these functions are not needed and are linked in by the
-// code unreachable on Windows. We should clean this up.
-int AsanOpenReadonly(const char* filename) {
-  UNIMPLEMENTED();
-}
-
-uptr AsanRead(int fd, void *buf, uptr count) {
-  UNIMPLEMENTED();
-}
-
-int AsanClose(int fd) {
-  UNIMPLEMENTED();
 }
 
 // ---------------------- Stacktraces, symbols, etc. ---------------- {{{1
 static AsanLock dbghelp_lock(LINKER_INITIALIZED);
 static bool dbghelp_initialized = false;
 #pragma comment(lib, "dbghelp.lib")
-
-void AsanThread::SetThreadStackTopAndBottom() {
-  MEMORY_BASIC_INFORMATION mbi;
-  CHECK(VirtualQuery(&mbi /* on stack */,
-                    &mbi, sizeof(mbi)) != 0);
-  // FIXME: is it possible for the stack to not be a single allocation?
-  // Are these values what ASan expects to get (reserved, not committed;
-  // including stack guard page) ?
-  stack_top_ = (uptr)mbi.BaseAddress + mbi.RegionSize;
-  stack_bottom_ = (uptr)mbi.AllocationBase;
-}
 
 void AsanStackTrace::GetStackTrace(uptr max_s, uptr pc, uptr bp) {
   max_size = max_s;
@@ -247,6 +197,13 @@ u16 AtomicExchange(u16 *a, u16 new_val) {
   return new_val;
 }
 
+u8 AtomicExchange(u8 *a, u8 new_val) {
+  // FIXME: can we do this with a proper xchg intrinsic?
+  u8 t = *a;
+  *a = new_val;
+  return t;
+}
+
 const char* AsanGetEnv(const char* name) {
   static char env_buffer[32767] = {};
 
@@ -265,10 +222,6 @@ const char* AsanGetEnv(const char* name) {
 
 void AsanDumpProcessMap() {
   UNIMPLEMENTED();
-}
-
-int GetPid() {
-  return GetProcessId(GetCurrentProcess());
 }
 
 uptr GetThreadSelf() {

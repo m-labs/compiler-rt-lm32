@@ -1,4 +1,4 @@
-//===-- asan_thread_registry.cc ---------------------------------*- C++ -*-===//
+//===-- asan_thread_registry.cc -------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -43,7 +43,7 @@ void AsanThreadRegistry::Init() {
 
 void AsanThreadRegistry::RegisterThread(AsanThread *thread) {
   ScopedLock lock(&mu_);
-  int tid = n_threads_;
+  u32 tid = n_threads_;
   n_threads_++;
   CHECK(n_threads_ < kMaxNumberOfThreads);
 
@@ -88,7 +88,8 @@ AsanThread *AsanThreadRegistry::GetCurrent() {
 void AsanThreadRegistry::SetCurrent(AsanThread *t) {
   CHECK(t->summary());
   if (FLAG_v >= 2) {
-    Report("SetCurrent: %p for thread %p\n", t->summary(), GetThreadSelf());
+    Report("SetCurrent: %p for thread %p\n",
+           t->summary(), (void*)GetThreadSelf());
   }
   // Make sure we do not reset the current AsanThread.
   CHECK(AsanTSDGet() == 0);
@@ -129,8 +130,7 @@ uptr AsanThreadRegistry::GetFreeBytes() {
          + accumulated_stats_.really_freed_redzones;
 }
 
-AsanThreadSummary *AsanThreadRegistry::FindByTid(int tid) {
-  CHECK(tid >= 0);
+AsanThreadSummary *AsanThreadRegistry::FindByTid(u32 tid) {
   CHECK(tid < n_threads_);
   CHECK(thread_summaries_[tid]);
   return thread_summaries_[tid];
@@ -138,10 +138,7 @@ AsanThreadSummary *AsanThreadRegistry::FindByTid(int tid) {
 
 AsanThread *AsanThreadRegistry::FindThreadByStackAddress(uptr addr) {
   ScopedLock lock(&mu_);
-  // Main thread (tid = 0) stack limits are pretty much guessed; for the other
-  // threads we ask libpthread, so their limits must be correct.
-  // Scanning the thread list backwards makes this function more reliable.
-  for (int tid = n_threads_ - 1; tid >= 0; tid--) {
+  for (u32 tid = 0; tid < n_threads_; tid++) {
     AsanThread *t = thread_summaries_[tid]->thread();
     if (!t || !(t->fake_stack().StackSize())) continue;
     if (t->fake_stack().AddrIsInFakeStack(addr) || t->AddrIsInStack(addr)) {
@@ -152,7 +149,7 @@ AsanThread *AsanThreadRegistry::FindThreadByStackAddress(uptr addr) {
 }
 
 void AsanThreadRegistry::UpdateAccumulatedStatsUnlocked() {
-  for (int tid = 0; tid < n_threads_; tid++) {
+  for (u32 tid = 0; tid < n_threads_; tid++) {
     AsanThread *t = thread_summaries_[tid]->thread();
     if (t != 0) {
       FlushToAccumulatedStatsUnlocked(&t->stats());

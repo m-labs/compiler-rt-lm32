@@ -19,6 +19,8 @@
 #include "asan_procmaps.h"
 #include "asan_stack.h"
 #include "asan_thread_registry.h"
+#include "sanitizer_common/sanitizer_libc.h"
+#include "sanitizer_common/sanitizer_procmaps.h"
 
 #include <pthread.h>
 #include <signal.h>
@@ -51,7 +53,7 @@ static inline bool IntervalsAreSeparate(uptr start1, uptr end1,
 // several worker threads on Mac, which aren't expected to map big chunks of
 // memory).
 bool AsanShadowRangeIsAvailable() {
-  AsanProcMaps procmaps;
+  ProcessMaps procmaps;
   uptr start, end;
   uptr shadow_start = kLowShadowBeg;
   if (kLowShadowBeg > 0) shadow_start -= kMmapGranularity;
@@ -82,14 +84,14 @@ static void MaybeInstallSigaction(int signum,
 static void     ASAN_OnSIGSEGV(int, siginfo_t *siginfo, void *context) {
   uptr addr = (uptr)siginfo->si_addr;
   // Write the first message using the bullet-proof write.
-  if (13 != AsanWrite(2, "ASAN:SIGSEGV\n", 13)) AsanDie();
+  if (13 != internal_write(2, "ASAN:SIGSEGV\n", 13)) Die();
   uptr pc, sp, bp;
   GetPcSpBp(context, &pc, &sp, &bp);
-  Report("ERROR: AddressSanitizer crashed on unknown address %p"
-         " (pc %p sp %p bp %p T%d)\n",
-         addr, pc, sp, bp,
-         asanThreadRegistry().GetCurrentTidOrMinusOne());
-  Printf("AddressSanitizer can not provide additional info. ABORTING\n");
+  AsanReport("ERROR: AddressSanitizer crashed on unknown address %p"
+             " (pc %p sp %p bp %p T%d)\n",
+             (void*)addr, (void*)pc, (void*)sp, (void*)bp,
+             asanThreadRegistry().GetCurrentTidOrInvalid());
+  AsanPrintf("AddressSanitizer can not provide additional info. ABORTING\n");
   GET_STACK_TRACE_WITH_PC_AND_BP(kStackTraceMax, pc, bp);
   stack.PrintStack();
   ShowStatsAndAbort();
@@ -103,14 +105,14 @@ void SetAlternateSignalStack() {
   // TODO(glider): the mapped stack should have the MAP_STACK flag in the
   // future. It is not required by man 2 sigaltstack now (they're using
   // malloc()).
-  void* base = AsanMmapSomewhereOrDie(kAltStackSize, __FUNCTION__);
+  void* base = MmapOrDie(kAltStackSize, __FUNCTION__);
   altstack.ss_sp = base;
   altstack.ss_flags = 0;
   altstack.ss_size = kAltStackSize;
   CHECK(0 == sigaltstack(&altstack, 0));
   if (FLAG_v > 0) {
     Report("Alternative stack for T%d set: [%p,%p)\n",
-           asanThreadRegistry().GetCurrentTidOrMinusOne(),
+           asanThreadRegistry().GetCurrentTidOrInvalid(),
            altstack.ss_sp, (char*)altstack.ss_sp + altstack.ss_size);
   }
 }
@@ -121,7 +123,7 @@ void UnsetAlternateSignalStack() {
   altstack.ss_flags = SS_DISABLE;
   altstack.ss_size = 0;
   CHECK(0 == sigaltstack(&altstack, &oldstack));
-  AsanUnmapOrDie(oldstack.ss_sp, oldstack.ss_size);
+  UnmapOrDie(oldstack.ss_sp, oldstack.ss_size);
 }
 
 void InstallSignalHandlers() {
@@ -141,7 +143,7 @@ void AsanDisableCoreDumper() {
 }
 
 void AsanDumpProcessMap() {
-  AsanProcMaps proc_maps;
+  ProcessMaps proc_maps;
   uptr start, end;
   const sptr kBufSize = 4095;
   char filename[kBufSize];
@@ -151,10 +153,6 @@ void AsanDumpProcessMap() {
     Printf("\t%p-%p\t%s\n", (void*)start, (void*)end, filename);
   }
   Report("End of process memory map.\n");
-}
-
-int GetPid() {
-  return getpid();
 }
 
 uptr GetThreadSelf() {
@@ -186,6 +184,10 @@ int AtomicInc(int *a) {
 }
 
 u16 AtomicExchange(u16 *a, u16 new_val) {
+  return __sync_lock_test_and_set(a, new_val);
+}
+
+u8 AtomicExchange(u8 *a, u8 new_val) {
   return __sync_lock_test_and_set(a, new_val);
 }
 

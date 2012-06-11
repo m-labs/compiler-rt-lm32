@@ -26,6 +26,7 @@
 #ifndef TSAN_RTL_H
 #define TSAN_RTL_H
 
+#include "sanitizer_common/sanitizer_common.h"
 #include "tsan_clock.h"
 #include "tsan_defs.h"
 #include "tsan_flags.h"
@@ -36,8 +37,7 @@
 
 namespace __tsan {
 
-void Printf(const char *format, ...) FORMAT(1, 2);
-uptr Snprintf(char *buffer, uptr length, const char *format, ...)  FORMAT(3, 4);
+void TsanPrintf(const char *format, ...);
 
 // FastState (from most significant bit):
 //   unused          : 1
@@ -390,7 +390,6 @@ void ALWAYS_INLINE INLINE StatInc(ThreadState *thr, StatType typ, u64 n = 1) {
 void InitializeShadowMemory();
 void InitializeInterceptors();
 void InitializeDynamicAnnotations();
-void Die() NORETURN;
 
 void ReportRace(ThreadState *thr);
 bool OutputReport(const ScopedReport &srep,
@@ -398,13 +397,13 @@ bool OutputReport(const ScopedReport &srep,
 bool IsExpectedReport(uptr addr, uptr size);
 
 #if defined(TSAN_DEBUG_OUTPUT) && TSAN_DEBUG_OUTPUT >= 1
-# define DPrintf Printf
+# define DPrintf TsanPrintf
 #else
 # define DPrintf(...)
 #endif
 
 #if defined(TSAN_DEBUG_OUTPUT) && TSAN_DEBUG_OUTPUT >= 2
-# define DPrintf2 Printf
+# define DPrintf2 TsanPrintf
 #else
 # define DPrintf2(...)
 #endif

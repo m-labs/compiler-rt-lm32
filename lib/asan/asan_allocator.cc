@@ -1,4 +1,4 @@
-//===-- asan_allocator.cc ---------------------------------------*- C++ -*-===//
+//===-- asan_allocator.cc -------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -131,7 +131,7 @@ static void PoisonHeapPartialRightRedzone(uptr mem, uptr size) {
 
 static u8 *MmapNewPagesAndPoisonShadow(uptr size) {
   CHECK(IsAligned(size, kPageSize));
-  u8 *res = (u8*)AsanMmapSomewhereOrDie(size, __FUNCTION__);
+  u8 *res = (u8*)MmapOrDie(size, __FUNCTION__);
   PoisonShadow((uptr)res, size, kAsanHeapLeftRedzoneMagic);
   if (FLAG_debug) {
     Printf("ASAN_MMAP: [%p, %p)\n", res, res + size);
@@ -145,71 +145,81 @@ static u8 *MmapNewPagesAndPoisonShadow(uptr size) {
 // CHUNK_QUARANTINE: the chunk was freed and put into quarantine zone.
 //
 // The pseudo state CHUNK_MEMALIGN is used to mark that the address is not
-// the beginning of a AsanChunk (in which case 'next' contains the address
-// of the AsanChunk).
+// the beginning of a AsanChunk (in which the actual chunk resides at
+// this - this->used_size).
 //
 // The magic numbers for the enum values are taken randomly.
 enum {
-  CHUNK_AVAILABLE  = 0x573B,
-  CHUNK_ALLOCATED  = 0x3204,
-  CHUNK_QUARANTINE = 0x1978,
-  CHUNK_MEMALIGN   = 0xDC68,
+  CHUNK_AVAILABLE  = 0x57,
+  CHUNK_ALLOCATED  = 0x32,
+  CHUNK_QUARANTINE = 0x19,
+  CHUNK_MEMALIGN   = 0xDC,
 };
 
 struct ChunkBase {
-  u16   chunk_state;
-  u8    size_class;
-  u32   offset;  // User-visible memory starts at this+offset (beg()).
-  s32    alloc_tid;
-  s32    free_tid;
-  uptr     used_size;  // Size requested by the user.
+  // First 8 bytes.
+  uptr  chunk_state : 8;
+  uptr  size_class  : 8;
+  uptr  alloc_tid   : 24;
+  uptr  free_tid    : 24;
+
+  // Second 8 bytes.
+  uptr alignment_log : 8;
+  uptr used_size : FIRST_32_SECOND_64(32, 56);  // Size requested by the user.
+
+  // This field may overlap with the user area and thus should not
+  // be used while the chunk is in CHUNK_ALLOCATED state.
   AsanChunk *next;
 
-  uptr   beg() { return (uptr)this + offset; }
+  // Typically the beginning of the user-accessible memory is 'this'+REDZONE
+  // and is also aligned by REDZONE. However, if the memory is allocated
+  // by memalign, the alignment might be higher and the user-accessible memory
+  // starts at the first properly aligned address after 'this'.
+  uptr Beg() { return RoundUpTo((uptr)this + 1, 1 << alignment_log); }
   uptr Size() { return SizeClassToSize(size_class); }
   u8 SizeClass() { return size_class; }
 };
 
 struct AsanChunk: public ChunkBase {
   u32 *compressed_alloc_stack() {
-    CHECK(REDZONE >= sizeof(ChunkBase));
     return (u32*)((uptr)this + sizeof(ChunkBase));
   }
   u32 *compressed_free_stack() {
-    CHECK(REDZONE >= sizeof(ChunkBase));
-    return (u32*)((uptr)this + REDZONE);
+    return (u32*)((uptr)this + Max(REDZONE, (uptr)sizeof(ChunkBase)));
   }
 
   // The left redzone after the ChunkBase is given to the alloc stack trace.
   uptr compressed_alloc_stack_size() {
+    if (REDZONE < sizeof(ChunkBase)) return 0;
     return (REDZONE - sizeof(ChunkBase)) / sizeof(u32);
   }
   uptr compressed_free_stack_size() {
+    if (REDZONE < sizeof(ChunkBase)) return 0;
     return (REDZONE) / sizeof(u32);
   }
 
   bool AddrIsInside(uptr addr, uptr access_size, uptr *offset) {
-    if (addr >= beg() && (addr + access_size) <= (beg() + used_size)) {
-      *offset = addr - beg();
+    if (addr >= Beg() && (addr + access_size) <= (Beg() + used_size)) {
+      *offset = addr - Beg();
       return true;
     }
     return false;
   }
 
   bool AddrIsAtLeft(uptr addr, uptr access_size, uptr *offset) {
-    if (addr < beg()) {
-      *offset = beg() - addr;
+    if (addr < Beg()) {
+      *offset = Beg() - addr;
       return true;
     }
     return false;
   }
 
   bool AddrIsAtRight(uptr addr, uptr access_size, uptr *offset) {
-    if (addr + access_size >= beg() + used_size) {
-      if (addr <= beg() + used_size)
+    if (addr + access_size >= Beg() + used_size) {
+      if (addr <= Beg() + used_size)
         *offset = 0;
       else
-        *offset = addr - (beg() + used_size);
+        *offset = addr - (Beg() + used_size);
       return true;
     }
     return false;
@@ -217,25 +227,25 @@ struct AsanChunk: public ChunkBase {
 
   void DescribeAddress(uptr addr, uptr access_size) {
     uptr offset;
-    Printf("%p is located ", addr);
+    AsanPrintf("%p is located ", (void*)addr);
     if (AddrIsInside(addr, access_size, &offset)) {
-      Printf("%zu bytes inside of", offset);
+      AsanPrintf("%zu bytes inside of", offset);
     } else if (AddrIsAtLeft(addr, access_size, &offset)) {
-      Printf("%zu bytes to the left of", offset);
+      AsanPrintf("%zu bytes to the left of", offset);
     } else if (AddrIsAtRight(addr, access_size, &offset)) {
-      Printf("%zu bytes to the right of", offset);
+      AsanPrintf("%zu bytes to the right of", offset);
     } else {
-      Printf(" somewhere around (this is AddressSanitizer bug!)");
+      AsanPrintf(" somewhere around (this is AddressSanitizer bug!)");
     }
-    Printf(" %zu-byte region [%p,%p)\n",
-           used_size, beg(), beg() + used_size);
+    AsanPrintf(" %zu-byte region [%p,%p)\n",
+               used_size, (void*)Beg(), (void*)(Beg() + used_size));
   }
 };
 
 static AsanChunk *PtrToChunk(uptr ptr) {
   AsanChunk *m = (AsanChunk*)(ptr - REDZONE);
   if (m->chunk_state == CHUNK_MEMALIGN) {
-    m = m->next;
+    m = (AsanChunk*)((uptr)m - m->used_size);
   }
   return m;
 }
@@ -585,23 +595,23 @@ static void Describe(uptr addr, uptr access_size) {
                                   m->compressed_alloc_stack_size());
   AsanThread *t = asanThreadRegistry().GetCurrent();
   CHECK(t);
-  if (m->free_tid >= 0) {
+  if (m->free_tid != kInvalidTid) {
     AsanThreadSummary *free_thread =
         asanThreadRegistry().FindByTid(m->free_tid);
-    Printf("freed by thread T%d here:\n", free_thread->tid());
+    AsanPrintf("freed by thread T%d here:\n", free_thread->tid());
     AsanStackTrace free_stack;
     AsanStackTrace::UncompressStack(&free_stack, m->compressed_free_stack(),
                                     m->compressed_free_stack_size());
     free_stack.PrintStack();
-    Printf("previously allocated by thread T%d here:\n",
-           alloc_thread->tid());
+    AsanPrintf("previously allocated by thread T%d here:\n",
+               alloc_thread->tid());
 
     alloc_stack.PrintStack();
     t->summary()->Announce();
     free_thread->Announce();
     alloc_thread->Announce();
   } else {
-    Printf("allocated by thread T%d here:\n", alloc_thread->tid());
+    AsanPrintf("allocated by thread T%d here:\n", alloc_thread->tid());
     alloc_stack.PrintStack();
     t->summary()->Announce();
     alloc_thread->Announce();
@@ -622,7 +632,8 @@ static u8 *Allocate(uptr alignment, uptr size, AsanStackTrace *stack) {
   }
   CHECK(IsAligned(needed_size, REDZONE));
   if (size > kMaxAllowedMallocSize || needed_size > kMaxAllowedMallocSize) {
-    Report("WARNING: AddressSanitizer failed to allocate %p bytes\n", size);
+    Report("WARNING: AddressSanitizer failed to allocate %p bytes\n",
+           (void*)size);
     return 0;
   }
 
@@ -667,21 +678,24 @@ static u8 *Allocate(uptr alignment, uptr size, AsanStackTrace *stack) {
   m->next = 0;
   CHECK(m->Size() == size_to_allocate);
   uptr addr = (uptr)m + REDZONE;
-  CHECK(addr == (uptr)m->compressed_free_stack());
+  CHECK(addr <= (uptr)m->compressed_free_stack());
 
   if (alignment > REDZONE && (addr & (alignment - 1))) {
     addr = RoundUpTo(addr, alignment);
     CHECK((addr & (alignment - 1)) == 0);
     AsanChunk *p = (AsanChunk*)(addr - REDZONE);
     p->chunk_state = CHUNK_MEMALIGN;
-    p->next = m;
+    p->used_size = (uptr)p - (uptr)m;
+    m->alignment_log = Log2(alignment);
+    CHECK(m->Beg() == addr);
+  } else {
+    m->alignment_log = Log2(REDZONE);
   }
   CHECK(m == PtrToChunk(addr));
   m->used_size = size;
-  m->offset = addr - (uptr)m;
-  CHECK(m->beg() == addr);
+  CHECK(m->Beg() == addr);
   m->alloc_tid = t ? t->tid() : 0;
-  m->free_tid   = AsanThread::kInvalidTid;
+  m->free_tid   = kInvalidTid;
   AsanStackTrace::CompressStack(stack, m->compressed_alloc_stack(),
                                 m->compressed_alloc_stack_size());
   PoisonShadow(addr, rounded_size, 0);
@@ -706,22 +720,24 @@ static void Deallocate(u8 *ptr, AsanStackTrace *stack) {
   // Printf("Deallocate %p\n", ptr);
   AsanChunk *m = PtrToChunk((uptr)ptr);
 
-  // Flip the state atomically to avoid race on double-free.
-  u16 old_chunk_state = AtomicExchange(&m->chunk_state, CHUNK_QUARANTINE);
+  // Flip the chunk_state atomically to avoid race on double-free.
+  u8 old_chunk_state = AtomicExchange((u8*)m, CHUNK_QUARANTINE);
 
   if (old_chunk_state == CHUNK_QUARANTINE) {
-    Report("ERROR: AddressSanitizer attempting double-free on %p:\n", ptr);
+    AsanReport("ERROR: AddressSanitizer attempting double-free on %p:\n", ptr);
     stack->PrintStack();
     Describe((uptr)ptr, 1);
     ShowStatsAndAbort();
   } else if (old_chunk_state != CHUNK_ALLOCATED) {
-    Report("ERROR: AddressSanitizer attempting free on address which was not"
-           " malloc()-ed: %p\n", ptr);
+    AsanReport("ERROR: AddressSanitizer attempting free on address "
+               "which was not malloc()-ed: %p\n", ptr);
     stack->PrintStack();
     ShowStatsAndAbort();
   }
   CHECK(old_chunk_state == CHUNK_ALLOCATED);
-  CHECK(m->free_tid == AsanThread::kInvalidTid);
+  // With REDZONE==16 m->next is in the user area, otherwise it should be 0.
+  CHECK(REDZONE <= 16 || !m->next);
+  CHECK(m->free_tid == kInvalidTid);
   CHECK(m->alloc_tid >= 0);
   AsanThread *t = asanThreadRegistry().GetCurrent();
   m->free_tid = t ? t->tid() : 0;
@@ -737,16 +753,15 @@ static void Deallocate(u8 *ptr, AsanStackTrace *stack) {
   thread_stats.freed_by_size[m->SizeClass()]++;
 
   CHECK(m->chunk_state == CHUNK_QUARANTINE);
+
   if (t) {
     AsanThreadLocalMallocStorage *ms = &t->malloc_storage();
-    CHECK(!m->next);
     ms->quarantine_.Push(m);
 
     if (ms->quarantine_.size() > kMaxThreadLocalQuarantine) {
       malloc_info.SwallowThreadLocalMallocStorage(ms, false);
     }
   } else {
-    CHECK(!m->next);
     malloc_info.BypassThreadLocalQuarantine(m);
   }
 }
@@ -866,8 +881,9 @@ uptr asan_malloc_usable_size(void *ptr, AsanStackTrace *stack) {
   if (ptr == 0) return 0;
   uptr usable_size = malloc_info.AllocationSize((uptr)ptr);
   if (FLAG_check_malloc_usable_size && (usable_size == 0)) {
-    Report("ERROR: AddressSanitizer attempting to call malloc_usable_size() "
-           "for pointer which is not owned: %p\n", ptr);
+    AsanReport("ERROR: AddressSanitizer attempting to call "
+               "malloc_usable_size() for pointer which is "
+               "not owned: %p\n", ptr);
     stack->PrintStack();
     Describe((uptr)ptr, 1);
     ShowStatsAndAbort();
@@ -964,7 +980,7 @@ void FakeStack::Cleanup() {
     if (mem) {
       PoisonShadow(mem, ClassMmapSize(i), 0);
       allocated_size_classes_[i] = 0;
-      AsanUnmapOrDie((void*)mem, ClassMmapSize(i));
+      UnmapOrDie((void*)mem, ClassMmapSize(i));
     }
   }
 }
@@ -975,7 +991,7 @@ uptr FakeStack::ClassMmapSize(uptr size_class) {
 
 void FakeStack::AllocateOneSizeClass(uptr size_class) {
   CHECK(ClassMmapSize(size_class) >= kPageSize);
-  uptr new_mem = (uptr)AsanMmapSomewhereOrDie(
+  uptr new_mem = (uptr)MmapOrDie(
       ClassMmapSize(size_class), __FUNCTION__);
   // Printf("T%d new_mem[%zu]: %p-%p mmap %zu\n",
   //       asanThreadRegistry().GetCurrent()->tid(),
@@ -1071,9 +1087,9 @@ uptr __asan_get_allocated_size(const void *p) {
   uptr allocated_size = malloc_info.AllocationSize((uptr)p);
   // Die if p is not malloced or if it is already freed.
   if (allocated_size == 0) {
-    Report("ERROR: AddressSanitizer attempting to call "
-           "__asan_get_allocated_size() for pointer which is "
-           "not owned: %p\n", p);
+    AsanReport("ERROR: AddressSanitizer attempting to call "
+               "__asan_get_allocated_size() for pointer which is "
+               "not owned: %p\n", p);
     PRINT_CURRENT_STACK();
     Describe((uptr)p, 1);
     ShowStatsAndAbort();
